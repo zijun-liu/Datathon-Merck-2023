@@ -1,0 +1,355 @@
+---
+title: "Merck-Datathon"
+author: "Zijun Liu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    highlight: haddock
+    theme: default
+    code_folding: hide
+    df_print: paged
+    toc: yes
+    toc_depth: '3'
+    toc_float:
+      collapsed: yes
+      smooth_scroll: yes
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_file = file.path(paste0("~/Dropbox/Merck-Datathon/05_output/Merck-Datathon-EDA-and-Analysis-", Sys.Date(), ".html"))) })
+---
+
+```{r}
+library(tidyverse)
+library(table1)
+library(arrow) # to read Apache parquet data
+library(here)
+library(broom)
+library(survival)
+library(survminer)
+library(readxl)
+library(grid)
+library(forestploter)
+here()
+```
+
+State level
+```{r}
+# read state data: each row is a state-year
+df_state <- read_parquet(here("03_clean_data", "State_FinalizedData.parquet"))
+
+# platform entry of each state: find thee min for each state in the two files
+df_entry_2016 <- read_csv(here("02_raw_data", "Section1115_SUD_States_By_Year_2016_inception.csv"))
+df_entry_2017 <- read_csv(here("02_raw_data", "Section1115_SUD_States_By_Year_2017_inception.csv"))
+
+# fips-state link
+df_fips <- read_csv(here("02_raw_data", "FIPS_Mapping.csv"))
+
+# data for fig1. forest plot of subgroup coefficients
+df_fig1 <- read_excel(here("03_clean_data", "Consolidated Tables.xlsx"),
+                      sheet = "fig1")
+```
+
+
+```{r}
+control_cols = c('log_population','male_prop', 'age_15_24_prop', 'age_25_44_prop', 'age_45_64_prop',
+                'age_65_prop', 'white_prop', 'black_prop', 'asian_prop',
+                'hispanic_prop', 'median_income', 'average_income', 'unemploy_prop',
+                'no_insurance_prop', 'high_school_prop', 'college_prop',
+                'marriage_prop', 'population', 'state_abbr', 'total_drug_tot_arrests',
+                'disorder_cond_tot_arrests', 'sale_drug_total_tot_arrests',
+                'poverty_all_ages', 'median_household_income')
+
+# only use some cols from above in diff-in-diff model
+control_cols_DID = c('male_prop','white_prop', 'age_15_24_prop','median_income','unemploy_prop', 'log_population', 'total_drug_tot_arrests')
+
+
+treatment_cols = c('pr_abuse_med_pct',
+       'pr_abuse_med_pay_pct', 'EMPLOY_Improved', 'LIVARAG_Improved',
+       'ARRESTS_Improved', 'DAYWAIT_Extreme', 'Treatment_completed',
+       'Treatment_death', 'FREQ1_Improved', 'FREQ_Improved',
+       'EMPLOY_Improved_withWage', 'LIVARAG_Improved_withWage',
+       'ARRESTS_Improved_withWage', 'DAYWAIT_Extreme_withWage',
+       'Treatment_completed_withWage', 'Treatment_death_withWage',
+       'FREQ1_Improved_withWage', 'FREQ_Improved_withWage',
+       'EMPLOY_Improved_woman', 'LIVARAG_Improved_woman',
+       'ARRESTS_Improved_woman', 'DAYWAIT_Extreme_woman',
+       'Treatment_completed_woman', 'Treatment_death_woman',
+       'FREQ1_Improved_woman', 'FREQ_Improved_woman',
+       'EMPLOY_Improved_african', 'LIVARAG_Improved_african',
+       'ARRESTS_Improved_african', 'DAYWAIT_Extreme_african',
+       'Treatment_completed_african', 'Treatment_death_african',
+       'FREQ1_Improved_african', 'FREQ_Improved_african',
+       'EMPLOY_Improved_preg', 'LIVARAG_Improved_preg',
+       'ARRESTS_Improved_preg', 'DAYWAIT_Extreme_preg',
+       'Treatment_completed_preg', 'Treatment_death_preg',
+       'FREQ1_Improved_preg', 'FREQ_Improved_preg', 'EMPLOY_Improved_co',
+       'LIVARAG_Improved_co', 'ARRESTS_Improved_co', 'DAYWAIT_Extreme_co',
+       'Treatment_completed_co', 'Treatment_death_co', 'FREQ1_Improved_co',
+       'FREQ_Improved_co', 'LOS_STAY_withWage', 'LOS_STAY', 'LOS_STAY_preg')
+
+facility_cols = c('REVCHK5_sum', 'TREATMT_sum', 'REVCHK5_gov_sum',
+       'TREATMT_gov_sum', 'ASSESSMENT_withTREATMT_mean',
+       'CTYPE7_withTREATMT_sum', 'REVCHK5_cplx_sum', 'REVCHK5_withTREATMT_sum',
+       'REVCHK5_sum_per_pop', 'TREATMT_sum_per_pop', 'REVCHK5_gov_sum_per_pop',
+       'TREATMT_gov_sum_per_pop', 'CTYPE7_withTREATMT_sum_per_pop',
+       'REVCHK5_cplx_sum_per_pop', 'REVCHK5_withTREATMT_sum_per_pop')
+
+# CTYPE7: Facility offers non-hospital residential treatment services
+target_col = 'CTYPE7_withTREATMT_sum'
+event_col = 'Event2016'
+time_col = 'year'
+id_col = 'state_abbr'
+```
+
+Questions: 'total_drug_tot_arrests' , 'Event2016', 'DAYWAIT_Extreme' meaning?
+what is daywait variable in state level?
+
+# 1. Table 1
+```{r}
+# diff-in-diff model
+# reg_did_df = reg_df[ [time_col,id_col,target_col,event_col]+used_cols ].copy().dropna()
+table1_col = c('log_population', 'male_prop', 'white_prop', 'age_15_24_prop', 'age_65_prop', 'median_income','unemploy_prop', 'total_drug_tot_arrests', 'poverty_all_ages')
+
+# df_state[c('year', 'Event2016', 'TREATMT_sum', 'TREATMT_sum_per_pop', 'DAYWAIT_Extreme', 'CTYPE7_withTREATMT_sum')]
+
+label(df_state$log_population) <- "log(Population)"
+label(df_state$male_prop) <- "Male Proportion"
+label(df_state$white_prop) <- "White Proportion"
+label(df_state$age_15_24_prop) <- "Age 15-24 Proportion"
+label(df_state$age_65_prop) <- "Age 65+ Proportion"
+label(df_state$median_income) <- "Income"
+label(df_state$unemploy_prop) <- "Unemployment Proportion"
+label(df_state$total_drug_tot_arrests) <- "Arrest due to Drug Proportion"
+label(df_state$poverty_all_ages) <- "Poverty Proportion"
+
+units(df_state$median_income) <- "Dollars"
+
+table1(~ log_population + male_prop + white_prop + age_15_24_prop + 
+       age_65_prop + median_income + unemploy_prop + total_drug_tot_arrests +
+         poverty_all_ages| year, 
+       data=df_state,
+       caption = "Descriptive statistics by year")
+```
+# 2. Cox regression as a robustness check
+Predict the platform entry as a function of drug abuse and other independent variables
+
+
+
+**Question: if state not found in both files, state had not entered as of 2020?**
+```{r cox data cleaning}
+# colnames(df_entry_2016)
+# rename coumns for merging
+df_entry_2016 <- df_entry_2016 %>% 
+  rename(state = IMD_Payment_Exclusion_SUD_Treatment,
+         year = Year) %>% 
+  select(-Link)
+
+df_entry_2017 <- df_entry_2017 %>% 
+  rename(state = IMD_Payment_Exclusion_SUD_Treatment,
+         year = Year) %>% 
+  select(-Link)
+
+# find the entry time for each state
+# if no entry time, state had not entered as of 2020
+df_entry_year <- df_entry_2016 %>% 
+  full_join(df_entry_2017, by = "state") %>% 
+  # find the smaller year in two df
+  mutate(year = ifelse(year.x<=year.y, year.x, year.y)) %>% 
+  # find the smallest year for each state
+  group_by(state) %>% 
+  summarise(entry_year = min(year))
+
+# add fips code for the state
+df_entry_year <- df_fips %>% 
+  left_join(df_entry_year, by = c("STATE"="state")) %>% 
+  rename(state=STATE)
+```
+
+
+```{r}
+# build data frame for survival analysis
+df_cox1 <- df_entry_year %>% 
+         # entry = o: censored, entry=1: censored/died
+  mutate(entry = ifelse(is.na(entry_year), 0, 1),
+         # time: survival time in years
+         time = ifelse(is.na(entry_year), 2020-2015, entry_year-2015))
+
+# extract X variables for Cox regression from df_state
+# and add it to df_cox1
+df_cox2 <- df_state %>% 
+  filter(year == 2015) %>% 
+  select(state_fips, FREQ1_Improved, FREQ1_Improved_co, log_population,male_prop, white_prop, 
+         age_15_24_prop, age_65_prop, median_income, unemploy_prop,
+         total_drug_tot_arrests, poverty_all_ages) %>% 
+  left_join(df_cox1, by = "state_fips") %>% 
+  select(state_fips, state, entry_year, entry, time, everything())
+```
+
+
+```{r km plot, include=FALSE}
+km_fit <- survfit(Surv(time, entry) ~ 1,
+                  data=df_cox2)
+# life table
+summary(km_fit)
+
+# km plot
+ggsurvplot(km_fit, data=df_cox2,
+           conf.int=TRUE, 
+           surv.median.line = "hv",
+           #risk.table="abs_pct", 
+           xlab = "Years before state entry of Section 1115",
+           title="Kaplan-Meier Curve for Section 1115 - state level", 
+           risk.table.height=.3, fontsize=3)
+```
+
+## 2.1 model FREQ1_Improved
+
+Cox regression - Breslow to handle ties
+```{r cox}
+# cox model with all variables
+m.cox.breslow <- coxph(Surv(time, entry) ~ FREQ1_Improved + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "breslow")
+
+# summary(m.cox.breslow)
+tidy(m.cox.breslow)
+```
+
+Cox regression - Efron to handle ties
+```{r}
+# cox model with all variables
+m.cox.efron <- coxph(Surv(time, entry) ~ FREQ1_Improved + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "efron")
+
+# summary(m.cox.efron)
+tidy(m.cox.efron)
+```
+
+Cox regression - Exact partial likelihood to handle ties
+```{r}
+# cox model with all variables
+m.cox.exact <- coxph(Surv(time, entry) ~ FREQ1_Improved + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "exact")
+
+# summary(m.cox.exact)
+tidy(m.cox.exact)
+```
+
+
+## 2.2 model FREQ1_Improved_co
+
+Cox regression - Breslow to handle ties
+```{r}
+# cox model with all variables
+m.cox.breslow <- coxph(Surv(time, entry) ~ FREQ1_Improved_co + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "breslow")
+
+# summary(m.cox.breslow)
+tidy(m.cox.breslow)
+```
+
+Cox regression - Efron to handle ties
+```{r}
+# cox model with all variables
+m.cox.efron <- coxph(Surv(time, entry) ~ FREQ1_Improved_co + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "efron")
+
+# summary(m.cox.efron)
+tidy(m.cox.efron)
+```
+
+Cox regression - Exact partial likelihood to handle ties
+```{r}
+# cox model with all variables
+m.cox.exact <- coxph(Surv(time, entry) ~ FREQ1_Improved_co + log_population + male_prop + 
+                 white_prop + age_15_24_prop + age_65_prop + median_income +
+                 unemploy_prop + total_drug_tot_arrests + poverty_all_ages,
+               data = df_cox2, 
+               ties = "exact")
+
+# summary(m.cox.exact)
+tidy(m.cox.exact)
+```
+
+# 3. fig1
+
+```{r fig.width=10, fig.height=10, eval=FALSE}
+
+# Read provided sample example data
+dt <- read.csv(system.file("extdata", "example_data.csv", package = "forestploter"))
+
+# Keep needed columns
+dt <- dt[,1:6]
+
+# indent the subgroup if there is a number in the placebo column
+dt$Subgroup <- ifelse(is.na(dt$Placebo), 
+                      dt$Subgroup,
+                      paste0("   ", dt$Subgroup))
+
+# NA to blank or NA will be transformed to carachter.
+dt$Treatment <- ifelse(is.na(dt$Treatment), "", dt$Treatment)
+dt$Placebo <- ifelse(is.na(dt$Placebo), "", dt$Placebo)
+dt$se <- (log(dt$hi) - log(dt$est))/1.96
+
+# Add blank column for the forest plot to display CI.
+# Adjust the column width with space, increase number of space below 
+# to have a larger area to draw the CI. 
+dt$` ` <- paste(rep(" ", 20), collapse = " ")
+
+# Create confidence interval column to display
+dt$`HR (95% CI)` <- ifelse(is.na(dt$se), "",
+                             sprintf("%.2f (%.2f to %.2f)",
+                                     dt$est, dt$low, dt$hi))
+
+p <- forest(dt[,c(1:3, 8:9)],
+            est = dt$est,
+            lower = dt$low, 
+            upper = dt$hi,
+            sizes = dt$se,
+            ci_column = 4,
+            ref_line = 1,
+            arrow_lab = c("Placebo Better", "Treatment Better"),
+            xlim = c(0, 4),
+            ticks_at = c(0.5, 1, 2, 3),
+            footnote = "This is the demo data. Please feel free to change\nanything you want.")
+
+# Print plot
+p
+```
+
+```{r}
+# prepare data for forest plot
+df_fig1_tidy <- df_fig1 %>% 
+  mutate(low_ci = coef-1.96*se,
+         high_ci = coef+1.96*se,
+         Subgroup = str_replace(subgroup_label, "All Population: ", ""),
+         Subgroup = str_replace(Subgroup, "Age group \\d+: ", ""),
+         ` ` = paste(rep(" ", 20), collapse = " "))
+df_fig1_tidy[df_fig1_tidy$subgroup=="medicaid", ]$Subgroup <- "Medicaid"
+
+# forest plot
+forest(df_fig1_tidy[,c(8,9)],
+            est = df_fig1_tidy$coef,
+            lower = df_fig1_tidy$low_ci, 
+            upper = df_fig1_tidy$high_ci,
+            sizes = 0.5,
+            ci_column = 2,
+            ref_line = 0,
+            #arrow_lab = c("Placebo Better", "Treatment Better"),
+            xlim = c(-0.05, 0.12),
+            ticks_at = c(-0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15))
+
+```
